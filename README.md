@@ -67,18 +67,3 @@ python3 app.py
 - **Custom Colors…** — pick your own background and chart color live.
 - Whichever theme you land on (a preset or custom colors) is remembered
   across restarts, saved to `~/.config/lsmith/config.json`.
-
-## Notes / next steps you might want
-
-- **Solve-for-me mode**: right now you dial in values by hand. A
-  natural next step is an analytic L-match solver (given source Z and
-  target Z0, compute the 1 or 2 component values directly) that
-  pre-fills the element list, with your manual tuning on top for
-  fine adjustment.
-- **Frequency sweep**: currently everything is single-frequency. You
-  could extend `MatchingNetwork` to accept a frequency array and plot
-  VSWR vs. frequency in a second axes, useful for checking matching
-  network bandwidth (relevant to your Yagi/hairpin match work).
-- **Transmission line / stub elements**: right now only lumped R/L/C
-  are supported. Adding a "series line" element (electrical length +
-  Z0) would let you model stub matches too.
