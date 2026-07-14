@@ -1,0 +1,4 @@
+matplotlib>=3.5
+numpy>=1.22
+# PyGObject (the "gi" module) is installed via apt, not pip, on Debian:
+#   sudo apt install python3-gi gir1.2-gtk-4.0
