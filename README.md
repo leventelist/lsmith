@@ -5,7 +5,7 @@ impedance, add series/shunt R/L/C elements, and watch each one trace
 its arc across the Smith chart. Live readouts for Z, Gamma, VSWR, and
 return loss.
 
-![Screenshot](docs/screenshot.png)
+![Screenshot](doc/screenshot.png)
 
 ## Files
 
