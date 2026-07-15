@@ -5,15 +5,18 @@ impedance, add series/shunt R/L/C elements, and watch each one trace
 its arc across the Smith chart. Live readouts for Z, Gamma, VSWR, and
 return loss.
 
+![Screenshot](docs/screenshot.png)
+
 ## Files
 
 - `engine.py` — core impedance math (no GUI deps). `MatchingNetwork`
   holds a source Z and an ordered list of series/shunt R/L/C elements,
   and computes the impedance after each step, plus Gamma/VSWR/return loss.
   This is fully unit-testable on its own.
-- `chart.py` — draws the Smith chart grid (constant-R circles,
-  constant-X arcs) on a matplotlib Axes, and maps Z -> Gamma for
-  plotting points and paths.
+- `chart.py` — draws the Smith chart grid: constant-R circles and
+  constant-X arcs (impedance), plus a fainter overlay of the mirrored
+  constant-G/constant-B admittance grid, both labeled with actual
+  ohm values scaled to Z0. Maps Z -> Gamma for plotting points and paths.
 - `app.py` — the GTK4 window: source Z0/R/X/frequency entries, an
   "Add element" list where each row is (series/shunt, R/L/C, value),
   and an embedded matplotlib canvas showing the chart + result readouts.
@@ -37,17 +40,19 @@ python3 app.py
    measurement).
 2. Click "+ Add element" to add a matching component. Choose:
    - **series** or **shunt** (topology)
-   - **R**, **L**, or **C** (component type — L is entered in nH, C in pF)
-   - the value
+   - **R**, **L**, or **C** (component type)
+   - the value and a unit — Ω/kΩ/MΩ for R, mH/µH/nH/pH for L,
+     mF/µF/nF/pF for C
 3. Each element appears as a colored arc on the chart, moving the
    impedance point along a constant-resistance circle (series) or
    constant-conductance circle (shunt), the same way you'd reason
    through a match by hand on paper.
 4. The final point (green star) and the readouts on the left show how
    close you are to Z0 — aim for VSWR near 1.0 / |Gamma| near 0.
-5. Hover the mouse over the chart to see the impedance at the pointer
-   (e.g. `Pointer: Z = 12.34-56.78j Ω`) below the canvas — handy for
-   reading off arbitrary points on the grid, not just the plotted ones.
+5. Hover the mouse over the chart to see the impedance and VSWR at the
+   pointer (e.g. `Pointer: Z = 12.34-56.78j Ω   VSWR = 3.42`) below the
+   canvas — handy for reading off arbitrary points on the grid, not
+   just the plotted ones.
 
 ## File menu
 

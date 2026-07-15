@@ -14,7 +14,11 @@ import numpy as np
 RESISTANCE_RINGS = (0.2, 0.5, 1.0, 2.0, 5.0)
 REACTANCE_ARCS = (0.2, 0.5, 1.0, 2.0, 5.0)
 
-GRID_ALPHA = 0.35  # grid lines are drawn in the foreground color at this alpha
+GRID_ALPHA = 0.35  # impedance grid lines, drawn in the foreground color at this alpha
+ADMITTANCE_ALPHA = 0.15  # admittance grid overlay -- fainter than the impedance grid
+LABEL_ALPHA = 0.65
+LABEL_FONTSIZE = 7
+LABEL_RADIUS = 1.18  # reactance labels sit just outside the |Gamma|=1 boundary
 
 
 @dataclass(frozen=True)
@@ -61,16 +65,24 @@ def _reactance_arc_points(x: float, n: int = 400):
     return cx + rad * np.cos(phis), cy + rad * np.sin(phis)
 
 
+def _fmt_ohms(value: float) -> str:
+    return f"{value:g}"
+
+
 def draw_smith_chart(ax, z0: float = 50.0, theme: ChartTheme = LIGHT_THEME) -> None:
     """Clear `ax` and draw the Smith chart grid on it."""
     ax.clear()
     fig = ax.get_figure()
     if fig is not None:
         fig.patch.set_facecolor(theme.background)
+        # matplotlib's default subplot margins leave ~20% of the figure as
+        # blank border; since there are no tick labels to make room for
+        # (axis is off), let the chart use nearly the whole canvas instead.
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
     ax.set_facecolor(theme.background)
     ax.set_aspect("equal")
-    ax.set_xlim(-1.15, 1.15)
-    ax.set_ylim(-1.15, 1.15)
+    ax.set_xlim(-1.3, 1.3)
+    ax.set_ylim(-1.3, 1.3)
     ax.axis("off")
 
     theta = np.linspace(0, 2 * np.pi, 400)
@@ -87,11 +99,35 @@ def draw_smith_chart(ax, z0: float = 50.0, theme: ChartTheme = LIGHT_THEME) -> N
         ax.plot(cx + rad * np.cos(theta), rad * np.sin(theta),
                 color=theme.foreground, alpha=GRID_ALPHA, linewidth=0.6, zorder=1)
 
+        # admittance mirror: the constant-conductance circle for the same
+        # normalized value is this same circle reflected across the
+        # imaginary axis (Gamma_y = -Gamma_z), drawn fainter as an overlay.
+        ax.plot(-(cx + rad * np.cos(theta)), rad * np.sin(theta),
+                color=theme.foreground, alpha=ADMITTANCE_ALPHA, linewidth=0.6, zorder=1)
+
+        # label at this circle's crossing of the real axis (the pure-R point)
+        ax.text(cx - rad, 0, _fmt_ohms(r * z0), color=theme.foreground, alpha=LABEL_ALPHA,
+                fontsize=LABEL_FONTSIZE, ha="center", va="bottom", zorder=2)
+
     # constant-reactance arcs (x = X / Z0), above and below the real axis
     for x in REACTANCE_ARCS:
         gx, gy = _reactance_arc_points(x)
         ax.plot(gx, gy, color=theme.foreground, alpha=GRID_ALPHA, linewidth=0.6, zorder=1)
         ax.plot(gx, -gy, color=theme.foreground, alpha=GRID_ALPHA, linewidth=0.6, zorder=1)
+
+        # admittance mirror (constant-susceptance arcs), fainter overlay
+        ax.plot(-gx, gy, color=theme.foreground, alpha=ADMITTANCE_ALPHA, linewidth=0.6, zorder=1)
+        ax.plot(-gx, -gy, color=theme.foreground, alpha=ADMITTANCE_ALPHA, linewidth=0.6, zorder=1)
+
+        # label just outside the boundary, at the arc's far end (where it
+        # meets |Gamma| = 1) pushed radially out -- keeps the inside of the
+        # chart uncluttered, matching where printed Smith charts put these.
+        ex, ey = gx[-1], gy[-1]
+        label = _fmt_ohms(x * z0)
+        ax.text(ex * LABEL_RADIUS, ey * LABEL_RADIUS, f"+j{label}", color=theme.foreground,
+                alpha=LABEL_ALPHA, fontsize=LABEL_FONTSIZE, ha="center", va="center", zorder=2)
+        ax.text(ex * LABEL_RADIUS, -ey * LABEL_RADIUS, f"-j{label}", color=theme.foreground,
+                alpha=LABEL_ALPHA, fontsize=LABEL_FONTSIZE, ha="center", va="center", zorder=2)
 
     # zero-reactance line (real axis, from short at -1 to open at +1)
     ax.plot([-1, 1], [0, 0], color=theme.foreground, alpha=GRID_ALPHA, linewidth=0.6, zorder=1)

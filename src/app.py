@@ -32,13 +32,18 @@ from chart import (  # noqa: E402
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "lsmith")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
-# Unit scaling for the value spin buttons: L in nH, C in pF, R in ohms,
-# converted to base SI units (H, F, ohms) before hitting the engine.
-UNIT_SCALE = {
-    Kind.R: (1.0, "\u03a9"),
-    Kind.L: (1e-9, "nH"),
-    Kind.C: (1e-12, "pF"),
+# Unit choices offered per component kind: (label, multiplier to SI base
+# unit -- ohms for R, henries for L, farads for C). The engine only ever
+# sees the SI value; the multiplier just converts what's typed in the box.
+UNIT_OPTIONS: dict[Kind, list[tuple[str, float]]] = {
+    Kind.R: [("\u03a9", 1.0), ("k\u03a9", 1e3), ("M\u03a9", 1e6)],
+    Kind.L: [("mH", 1e-3), ("\u00b5H", 1e-6), ("nH", 1e-9), ("pH", 1e-12)],
+    Kind.C: [("mF", 1e-3), ("\u00b5F", 1e-6), ("nF", 1e-9), ("pF", 1e-12)],
 }
+
+# Default unit index selected when a row's kind changes, matching the
+# previous fixed units (ohms, nH, pF).
+DEFAULT_UNIT_INDEX: dict[Kind, int] = {Kind.R: 0, Kind.L: 2, Kind.C: 3}
 
 COLORS = ["#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
 
@@ -57,7 +62,8 @@ class ElementRow(Gtk.Box):
         self.value_entry.set_increments(1, 10)
         self.value_entry.set_digits(3)
         self.value_entry.set_value(10.0)
-        self.unit_label = Gtk.Label(label="nH")
+        self.value_entry.set_width_chars(10)
+        self.unit_combo = Gtk.DropDown()
 
         remove_btn = Gtk.Button(icon_name="list-remove-symbolic")
         remove_btn.connect("clicked", lambda *_: on_remove(self))
@@ -66,15 +72,17 @@ class ElementRow(Gtk.Box):
         self.topo_combo.connect("notify::selected", lambda *_: self.on_change())
         self.kind_combo.connect("notify::selected", lambda *_: self.on_change())
         self.value_entry.connect("value-changed", lambda *_: self.on_change())
+        self.unit_combo.connect("notify::selected", lambda *_: self.on_change())
 
-        for w in (self.topo_combo, self.kind_combo, self.value_entry, self.unit_label, remove_btn):
+        for w in (self.topo_combo, self.kind_combo, self.value_entry, self.unit_combo, remove_btn):
             self.append(w)
         self._update_unit()
 
     def _update_unit(self, *_):
         kind = self.get_kind()
-        _, unit = UNIT_SCALE[kind]
-        self.unit_label.set_label(unit)
+        labels = [label for label, _ in UNIT_OPTIONS[kind]]
+        self.unit_combo.set_model(Gtk.StringList.new(labels))
+        self.unit_combo.set_selected(DEFAULT_UNIT_INDEX[kind])
         self.on_change()
 
     def get_topology(self) -> Topology:
@@ -83,8 +91,18 @@ class ElementRow(Gtk.Box):
     def get_kind(self) -> Kind:
         return [Kind.R, Kind.L, Kind.C][self.kind_combo.get_selected()]
 
+    def get_unit_label(self) -> str:
+        options = UNIT_OPTIONS[self.get_kind()]
+        return options[self.unit_combo.get_selected()][0]
+
+    def set_unit_label(self, label: str) -> None:
+        for i, (lbl, _) in enumerate(UNIT_OPTIONS[self.get_kind()]):
+            if lbl == label:
+                self.unit_combo.set_selected(i)
+                return
+
     def get_value_si(self) -> float:
-        scale, _ = UNIT_SCALE[self.get_kind()]
+        _, scale = UNIT_OPTIONS[self.get_kind()][self.unit_combo.get_selected()]
         return self.value_entry.get_value() * scale
 
 
@@ -113,7 +131,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
 
         # ---- left: controls ----
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        left.set_size_request(340, -1)
+        left.set_size_request(420, -1)
         root.append(left)
 
         left.append(Gtk.Label(label="<b>Source / system</b>", use_markup=True, xalign=0))
@@ -124,6 +142,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.z0_entry.set_range(1, 1000)
         self.z0_entry.set_increments(1, 10)
         self.z0_entry.set_value(50.0)
+        self.z0_entry.set_width_chars(12)
         self.z0_entry.connect("value-changed", self._recompute)
 
         self.freq_entry = Gtk.SpinButton()
@@ -131,18 +150,21 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.freq_entry.set_increments(0.1, 1)
         self.freq_entry.set_digits(3)
         self.freq_entry.set_value(14.2)
+        self.freq_entry.set_width_chars(12)
         self.freq_entry.connect("value-changed", self._recompute)
 
         self.r_src_entry = Gtk.SpinButton()
         self.r_src_entry.set_range(0, 100000)
         self.r_src_entry.set_increments(1, 10)
         self.r_src_entry.set_value(25.0)
+        self.r_src_entry.set_width_chars(12)
         self.r_src_entry.connect("value-changed", self._recompute)
 
         self.x_src_entry = Gtk.SpinButton()
         self.x_src_entry.set_range(-100000, 100000)
         self.x_src_entry.set_increments(1, 10)
         self.x_src_entry.set_value(-30.0)
+        self.x_src_entry.set_width_chars(12)
         self.x_src_entry.connect("value-changed", self._recompute)
 
         grid.attach(Gtk.Label(label="Z0 (\u03a9)", xalign=0), 0, 0, 1, 1)
@@ -251,11 +273,16 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         gamma = complex(event.xdata, event.ydata)
         z0 = self.z0_entry.get_value()
         if abs(1 - gamma) < 1e-9:
-            self.pointer_label.set_label("Pointer: Z = \u221e (open circuit)")
+            self.pointer_label.set_label("Pointer: Z = \u221e (open circuit)   VSWR = \u221e")
             return
 
+        gamma_mag = abs(gamma)
+        vswr_str = "\u221e" if gamma_mag >= 1.0 else f"{(1 + gamma_mag) / (1 - gamma_mag):.2f}"
+
         z = gamma_to_z(gamma, z0)
-        self.pointer_label.set_label(f"Pointer: Z = {z.real:.2f}{z.imag:+.2f}j \u03a9")
+        self.pointer_label.set_label(
+            f"Pointer: Z = {z.real:.2f}{z.imag:+.2f}j \u03a9   VSWR = {vswr_str}"
+        )
 
     # ---- File menu ----
     def _build_menu_model(self) -> Gio.Menu:
@@ -444,6 +471,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
                     "topology": row.get_topology().value,
                     "kind": row.get_kind().value,
                     "value": row.value_entry.get_value(),
+                    "unit": row.get_unit_label(),
                 }
                 for row in self.rows
             ],
@@ -483,6 +511,8 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
             row.topo_combo.set_selected(0 if el.get("topology") == "series" else 1)
             row.kind_combo.set_selected(kinds.index(el.get("kind", "R")))
             row.value_entry.set_value(el.get("value", 0.0))
+            if "unit" in el:
+                row.set_unit_label(el["unit"])
 
         if not self.rows:
             self._add_row()
