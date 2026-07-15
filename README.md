@@ -7,6 +7,8 @@ return loss.
 
 ![Screenshot](doc/screenshot.png)
 
+![Screenshot_sweep](doc/screenshot_sweep.png)
+
 ## Files
 
 - `engine.py` — core impedance math (no GUI deps). `MatchingNetwork`
@@ -17,9 +19,11 @@ return loss.
   constant-X arcs (impedance), plus a fainter overlay of the mirrored
   constant-G/constant-B admittance grid, both labeled with actual
   ohm values scaled to Z0. Maps Z -> Gamma for plotting points and paths.
-- `app.py` — the GTK4 window: source Z0/R/X/frequency entries, an
-  "Add element" list where each row is (series/shunt, R/L/C, value),
-  and an embedded matplotlib canvas showing the chart + result readouts.
+- `app.py` — the GTK4 windows: the main window (source Z0/R/X/frequency
+  entries, an "Add element" list where each row is (series/shunt, R/L/C,
+  value, unit), the Smith chart, and result readouts) plus a separate
+  "Frequency Sweep" window (VSWR-vs-frequency plot and results table,
+  side by side). All the major panes are separated by draggable dividers.
 
 ## Setup (Debian/Ubuntu)
 
@@ -53,16 +57,24 @@ python3 app.py
    pointer (e.g. `Pointer: Z = 12.34-56.78j Ω   VSWR = 3.42`) below the
    canvas — handy for reading off arbitrary points on the grid, not
    just the plotted ones.
+6. The **Frequency sweep** section (Start/Stop MHz, Steps) evaluates the
+   same source + elements across a frequency range instead of just the
+   single Freq value, so you can check a match's bandwidth. Results show
+   up live in the separate "Frequency Sweep" window (plot and table side
+   by side) — see the View menu to show/hide it, or overlay the swept
+   points directly on the Smith chart.
 
 ## File menu
 
 - **Open… / Save / Save As…** (`Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S`) —
-  save the source settings (Z0, frequency, source R/X) and the full
-  element list to a JSON file, or reload one later. Handy for keeping
-  a matching network per antenna/band around instead of re-entering
-  values by hand.
+  save the source settings (Z0, frequency, source R/X), the frequency
+  sweep range (Start/Stop/Steps), and the full element list to a JSON
+  file, or reload one later. Handy for keeping a matching network per
+  antenna/band around instead of re-entering values by hand.
 - **Export to PNG…** (`Ctrl+E`) — save the current Smith chart (grid,
   arcs, and points as currently drawn) as a PNG image.
+- **Export Sweep Table to CSV…** (`Ctrl+Shift+E`) — save the frequency
+  sweep results (Freq/VSWR/Return Loss) as a CSV file.
 - **Quit** (`Ctrl+Q`).
 
 ## View menu
@@ -72,3 +84,8 @@ python3 app.py
 - **Custom Colors…** — pick your own background and chart color live.
 - Whichever theme you land on (a preset or custom colors) is remembered
   across restarts, saved to `~/.config/lsmith/config.json`.
+- **Show Sweep Points on Chart** — overlay the swept frequency points
+  (dots joined by straight lines) on the Smith chart itself.
+- **Show Sweep Window** — show/hide the separate "Frequency Sweep"
+  window; closing it from its own titlebar does the same thing, and
+  this checkbox always reflects whether it's currently open.

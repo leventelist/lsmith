@@ -149,3 +149,48 @@ def plot_path(ax, points: list[complex], z0: float = 50.0, color: str = "red",
     xs = [g.real for g in gs]
     ys = [g.imag for g in gs]
     ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=zorder)
+
+
+def plot_sweep_points(ax, points: list[complex], z0: float = 50.0, color: str = "#e377c2",
+                       markersize: float = 4.0, linewidth: float = 1.0,
+                       label: str | None = None, zorder: int = 3):
+    """
+    Plot frequency-sweep impedance points as dots joined by straight line
+    segments -- unlike plot_path (which traces an element's actual curved
+    arc), this just connects the swept points directly, point to point.
+    """
+    gs = [z_to_gamma(p, z0) for p in points]
+    xs = [g.real for g in gs]
+    ys = [g.imag for g in gs]
+    ax.plot(xs, ys, marker="o", markersize=markersize, linestyle="-",
+             linewidth=linewidth, color=color, label=label, zorder=zorder)
+
+
+def draw_vswr_sweep(ax, freqs_hz: list[float], vswr_values: list[float],
+                     theme: ChartTheme = LIGHT_THEME, vswr_ceiling: float = 10.0) -> None:
+    """Clear `ax` and plot VSWR vs. frequency for a sweep, clipping the
+    (possibly infinite) VSWR values to vswr_ceiling so one bad point
+    doesn't flatten the rest of the curve."""
+    ax.clear()
+    fig = ax.get_figure()
+    if fig is not None:
+        fig.patch.set_facecolor(theme.background)
+    ax.set_facecolor(theme.background)
+
+    freqs_mhz = [f / 1e6 for f in freqs_hz]
+    clipped = [min(v, vswr_ceiling) for v in vswr_values]
+
+    ax.axhline(2.0, color=theme.foreground, alpha=0.3, linewidth=0.8, linestyle="--", zorder=1)
+    ax.plot(freqs_mhz, clipped, color="#d62728", linewidth=1.6, zorder=3)
+
+    ax.set_ylim(1.0, vswr_ceiling)
+    if len(freqs_mhz) > 1 and min(freqs_mhz) != max(freqs_mhz):
+        ax.set_xlim(min(freqs_mhz), max(freqs_mhz))
+
+    ax.set_xlabel("Frequency (MHz)", color=theme.foreground, fontsize=8)
+    ax.set_ylabel("VSWR", color=theme.foreground, fontsize=8)
+    ax.tick_params(colors=theme.foreground, labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_color(theme.foreground)
+        spine.set_alpha(0.4)
+    ax.grid(True, color=theme.foreground, alpha=0.15, linewidth=0.5)

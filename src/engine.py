@@ -179,3 +179,22 @@ class MatchingNetwork:
         if gamma <= 0:
             return float("inf")
         return -20.0 * math.log10(gamma)
+
+
+def sweep(
+    z_source: complex, elements: list[Element], freqs_hz: list[float], z0: float = 50.0
+) -> list[tuple[float, complex, float, float]]:
+    """
+    Evaluate the same source impedance and element chain (values fixed in
+    ohms/H/F) at each frequency in freqs_hz, returning a list of
+    (freq_hz, z_final, VSWR, return_loss_db) -- useful for checking a
+    matching network's bandwidth (and for plotting the swept impedance
+    points) rather than just its response at one frequency.
+    """
+    results = []
+    for f in freqs_hz:
+        net = MatchingNetwork(z_source=z_source, z0=z0, freq_hz=f)
+        net.elements = elements
+        z_final = net.final_impedance()
+        results.append((f, z_final, net.vswr(z_final), net.return_loss_db(z_final)))
+    return results
