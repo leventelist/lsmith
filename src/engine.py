@@ -7,9 +7,11 @@ or reused from a CLI/script independently of the GTK4 front end.
 from __future__ import annotations
 
 import cmath
+import csv
 import math
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Callable, Union
 
 
 class Topology(Enum):
@@ -182,22 +184,130 @@ class MatchingNetwork:
 
 
 def sweep(
-    z_source: complex, elements: list[Element], freqs_hz: list[float], z0: float = 50.0
+    z_source: Union[complex, Callable[[float], complex]],
+    elements: list[Element], freqs_hz: list[float], z0: float = 50.0,
 ) -> list[tuple[float, complex, float, float]]:
     """
-    Evaluate the same source impedance and element chain (values fixed in
-    ohms/H/F) at each frequency in freqs_hz, returning a list of
-    (freq_hz, z_final, VSWR, return_loss_db) -- useful for checking a
-    matching network's bandwidth (and for plotting the swept impedance
-    points) rather than just its response at one frequency.
+    Evaluate the element chain (values fixed in ohms/H/F) at each frequency
+    in freqs_hz, returning a list of (freq_hz, z_final, VSWR,
+    return_loss_db) -- useful for checking a matching network's bandwidth
+    (and for plotting the swept impedance points) rather than just its
+    response at one frequency.
+
+    z_source is either a fixed impedance (the usual case: an idealized,
+    frequency-independent source) or a callable freq_hz -> complex (e.g.
+    from interpolate_impedance(), for a real measured antenna whose
+    impedance actually varies across the band).
     """
     results = []
     for f in freqs_hz:
-        net = MatchingNetwork(z_source=z_source, z0=z0, freq_hz=f)
+        z_load = z_source(f) if callable(z_source) else z_source
+        net = MatchingNetwork(z_source=z_load, z0=z0, freq_hz=f)
         net.elements = elements
         z_final = net.final_impedance()
         results.append((f, z_final, net.vswr(z_final), net.return_loss_db(z_final)))
     return results
+
+
+def interpolate_impedance(data: list[tuple[float, complex]], freq_hz: float) -> complex:
+    """
+    Linearly interpolate R and X separately between the two nearest
+    frequency samples in data (a list of (freq_hz, Z) pairs, ascending by
+    frequency). Clamps at the ends rather than extrapolating past the
+    measured range, since a guess beyond measured data isn't meaningful.
+    """
+    if len(data) == 1 or freq_hz <= data[0][0]:
+        return data[0][1]
+    if freq_hz >= data[-1][0]:
+        return data[-1][1]
+    for (f0, z0_), (f1, z1_) in zip(data, data[1:]):
+        if f0 <= freq_hz <= f1:
+            t = (freq_hz - f0) / (f1 - f0) if f1 != f0 else 0.0
+            return complex(z0_.real + t * (z1_.real - z0_.real),
+                            z0_.imag + t * (z1_.imag - z0_.imag))
+    return data[-1][1]  # unreachable given the bounds checks above
+
+
+def load_impedance_csv(path: str) -> list[tuple[float, complex]]:
+    """
+    Load a simple (freq_MHz, R, X) CSV -- a header row is fine, it's just
+    skipped as unparsable -- returning a frequency-ascending list of
+    (freq_hz, Z) pairs suitable for interpolate_impedance()/sweep().
+    """
+    data = []
+    with open(path, newline="") as f:
+        for row in csv.reader(f):
+            if len(row) < 3:
+                continue
+            try:
+                freq_mhz, r, x = float(row[0]), float(row[1]), float(row[2])
+            except ValueError:
+                continue  # header row, blank line, or comment
+            data.append((freq_mhz * 1e6, complex(r, x)))
+    if not data:
+        raise ValueError("no numeric (freq, R, X) rows found in CSV")
+    return sorted(data, key=lambda item: item[0])
+
+
+def load_touchstone_1port(path: str) -> list[tuple[float, complex]]:
+    """
+    Load a 1-port Touchstone file (.s1p, as exported by most antenna/VNA
+    analyzers) and return a frequency-ascending list of (freq_hz, Z) pairs.
+    Supports S, Y, and Z parameter data in RI/MA/DB format, any of the
+    standard frequency units, and an explicit reference impedance (# ... R n).
+    """
+    freq_scale = {"HZ": 1.0, "KHZ": 1e3, "MHZ": 1e6, "GHZ": 1e9}
+    freq_unit = "GHZ"  # Touchstone default when the option line omits it
+    param_type = "S"
+    fmt = "MA"
+    z0 = 50.0
+
+    data = []
+    with open(path) as f:
+        for line in f:
+            line = line.split("!", 1)[0].strip()  # strip inline comments too
+            if not line:
+                continue
+            if line.startswith("#"):
+                tokens = line[1:].split()
+                i = 0
+                while i < len(tokens):
+                    token = tokens[i].upper()
+                    if token in freq_scale:
+                        freq_unit = token
+                    elif token in ("S", "Y", "Z", "H", "G"):
+                        param_type = token
+                    elif token in ("RI", "MA", "DB"):
+                        fmt = token
+                    elif token == "R" and i + 1 < len(tokens):
+                        i += 1
+                        z0 = float(tokens[i])
+                    i += 1
+                continue
+
+            values = line.split()
+            if len(values) < 3:
+                continue
+            freq = float(values[0]) * freq_scale[freq_unit]
+            a, b = float(values[1]), float(values[2])
+            if fmt == "RI":
+                p = complex(a, b)
+            elif fmt == "DB":
+                p = cmath.rect(10 ** (a / 20.0), math.radians(b))
+            else:  # MA
+                p = cmath.rect(a, math.radians(b))
+
+            if param_type == "Z":
+                z = p * z0  # Touchstone Z-parameters are normalized to R
+            elif param_type == "Y":
+                z = z0 / p
+            else:  # S (the overwhelmingly common case for antenna analyzers)
+                z = z0 * (1 + p) / (1 - p)
+            data.append((freq, z))
+
+    if not data:
+        raise ValueError("no data rows found in Touchstone file")
+    return sorted(data, key=lambda item: item[0])
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,19 @@
+! Sample antenna feedpoint sweep (synthetic), 20m dipole trimmed slightly
+! long -- resonance (X=0) near 14.3 MHz. Same antenna as
+! sample_antenna_sweep.csv, converted to S11 for testing the Touchstone
+! loader against the CSV loader.
+! Freq(MHz)  S11(real)  S11(imag)
+# MHz S RI R 50
+13.800 +0.269544 -0.670486
+13.900 +0.125968 -0.623814
+14.000 -0.009490 -0.526127
+14.100 -0.109145 -0.377494
+14.150 -0.137808 -0.287896
+14.200 -0.147081 -0.192082
+14.250 -0.137304 -0.096404
+14.300 -0.109844 -0.006159
+14.350 -0.067608 +0.075603
+14.400 -0.014198 +0.145935
+14.500 +0.110471 +0.248181
+14.600 +0.238992 +0.306153
+14.700 +0.357475 +0.332250

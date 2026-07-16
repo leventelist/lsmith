@@ -26,7 +26,10 @@ import json
 import math
 import os
 
-from engine import MatchingNetwork, Topology, Kind, sweep, solve_l_match, LMatchSolution  # noqa: E402
+from engine import (  # noqa: E402
+    MatchingNetwork, Topology, Kind, sweep, solve_l_match, LMatchSolution,
+    interpolate_impedance, load_impedance_csv, load_touchstone_1port,
+)
 from chart import (  # noqa: E402
     ChartTheme, LIGHT_THEME, DARK_THEME, draw_smith_chart, draw_vswr_sweep,
     plot_point, plot_path, plot_sweep_points, gamma_to_z,
@@ -212,6 +215,10 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.theme, self.theme_preset, self.paper_size = _load_view_config()
         self.sweep_results: list[tuple[float, complex, float, float]] = []
         self.show_sweep_on_chart = False
+        self.impedance_sweep_data: list[tuple[float, complex]] | None = None
+        self.use_imported_impedance = False
+        self.use_exact_imported_frequencies = False
+        self._imported_impedance_summary = ""
 
         self._setup_actions()
 
@@ -285,6 +292,22 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         auto_match_btn = Gtk.Button(label="Auto-Match to Z0\u2026")
         auto_match_btn.connect("clicked", self._do_auto_match)
         left.append(auto_match_btn)
+
+        self.imported_impedance_check = Gtk.CheckButton(label="Use imported impedance sweep")
+        self.imported_impedance_check.set_sensitive(False)
+        self.imported_impedance_check.connect("toggled", self._on_toggle_use_imported_impedance)
+        left.append(self.imported_impedance_check)
+
+        self.exact_frequencies_check = Gtk.CheckButton(
+            label="Sweep at exact imported frequencies"
+        )
+        self.exact_frequencies_check.set_sensitive(False)
+        self.exact_frequencies_check.connect("toggled", self._on_toggle_exact_frequencies)
+        left.append(self.exact_frequencies_check)
+
+        self.imported_impedance_label = Gtk.Label(xalign=0, wrap=True, label="No file imported.")
+        self.imported_impedance_label.add_css_class("dim-label")
+        left.append(self.imported_impedance_label)
 
         left.append(Gtk.Separator())
         left.append(Gtk.Label(label="<b>Matching elements</b>", use_markup=True, xalign=0))
@@ -398,9 +421,14 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
 
     # ---- auto-match ----
     def _do_auto_match(self, *_):
-        z0 = self.z0_entry.get_value()
-        freq_hz = self.freq_entry.get_value() * 1e6
-        z_src = complex(self.r_src_entry.get_value(), self.x_src_entry.get_value())
+        # self.network.z_source is the impedance actually in use at the
+        # current frequency -- either the manual Source R/X fields, or (if
+        # "Use imported impedance sweep" is on) the measured Z interpolated
+        # at Freq (MHz). Reading the R/X fields directly here would use a
+        # stale/disabled value in the imported case.
+        z0 = self.network.z0
+        freq_hz = self.network.freq_hz
+        z_src = self.network.z_source
 
         if z_src.real <= 0:
             self._show_error("Cannot auto-match: Source R must be positive.")
@@ -505,26 +533,52 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
     def _recompute(self, *_):
         z0 = self.z0_entry.get_value()
         freq_hz = self.freq_entry.get_value() * 1e6
-        z_src = complex(self.r_src_entry.get_value(), self.x_src_entry.get_value())
+
+        using_imported = self.use_imported_impedance and self.impedance_sweep_data is not None
+        if using_imported:
+            z_src = interpolate_impedance(self.impedance_sweep_data, freq_hz)
+        else:
+            z_src = complex(self.r_src_entry.get_value(), self.x_src_entry.get_value())
 
         self.network = MatchingNetwork(z_source=z_src, z0=z0, freq_hz=freq_hz)
         for row in self.rows:
             self.network.add(row.get_topology(), row.get_kind(), row.get_value_si())
 
-        # frequency sweep: same source Z and elements, evaluated across a
-        # frequency range instead of at the single Freq (MHz) value above.
-        # Computed before the chart is drawn so the swept points can
-        # optionally be plotted on it below.
-        sweep_start_hz = self.sweep_start_entry.get_value() * 1e6
-        sweep_stop_hz = self.sweep_stop_entry.get_value() * 1e6
-        sweep_steps = int(self.sweep_steps_entry.get_value())
-        if sweep_steps > 1:
-            step = (sweep_stop_hz - sweep_start_hz) / (sweep_steps - 1)
-            freqs = [sweep_start_hz + step * i for i in range(sweep_steps)]
+        # frequency sweep: same elements, evaluated across a frequency range
+        # instead of at the single Freq (MHz) value above. The source
+        # impedance is either fixed (the usual case) or, if an impedance
+        # sweep was imported and enabled, the measured Z interpolated at
+        # each frequency -- a real antenna's impedance isn't constant
+        # across the band. Computed before the chart is drawn so the swept
+        # points can optionally be plotted on it below.
+        if using_imported and self.use_exact_imported_frequencies:
+            # sweep at exactly the measured frequencies -- no interpolated
+            # grid, no risk of clamping past the file's own range
+            freqs = [f for f, _ in self.impedance_sweep_data]
         else:
-            freqs = [sweep_start_hz]
-        sweep_results = sweep(z_source=z_src, elements=self.network.elements, freqs_hz=freqs, z0=z0)
+            sweep_start_hz = self.sweep_start_entry.get_value() * 1e6
+            sweep_stop_hz = self.sweep_stop_entry.get_value() * 1e6
+            sweep_steps = int(self.sweep_steps_entry.get_value())
+            if sweep_steps > 1:
+                step = (sweep_stop_hz - sweep_start_hz) / (sweep_steps - 1)
+                freqs = [sweep_start_hz + step * i for i in range(sweep_steps)]
+            else:
+                freqs = [sweep_start_hz]
+
+        if using_imported:
+            data = self.impedance_sweep_data
+            sweep_z_source = lambda f: interpolate_impedance(data, f)  # noqa: E731
+        else:
+            sweep_z_source = z_src
+        sweep_results = sweep(z_source=sweep_z_source, elements=self.network.elements,
+                               freqs_hz=freqs, z0=z0)
         self.sweep_results = sweep_results
+
+        if using_imported:
+            self.imported_impedance_label.set_label(
+                f"Using imported Z = {z_src.real:.2f} {z_src.imag:+.2f}j Ω at "
+                f"{freq_hz / 1e6:.3f} MHz"
+            )
 
         self._draw_chart_content(self.ax, self.theme)
         self.canvas.draw_idle()
@@ -600,6 +654,10 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         io_section.append("Save As\u2026", "win.save-as")
         file_menu.append_section(None, io_section)
 
+        import_section = Gio.Menu()
+        import_section.append("Import Impedance Sweep (CSV/Touchstone)\u2026", "win.import-impedance")
+        file_menu.append_section(None, import_section)
+
         export_section = Gio.Menu()
         export_section.append("Export Chart to PNG\u2026", "win.export-png")
         export_section.append("Export Chart to PDF\u2026", "win.export-chart-pdf")
@@ -650,6 +708,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
             ("open", self._do_open, ["<Control>o"]),
             ("save", self._do_save, ["<Control>s"]),
             ("save-as", self._do_save_as, ["<Control><Shift>s"]),
+            ("import-impedance", self._do_import_impedance, []),
             ("export-png", self._do_export_png, ["<Control>e"]),
             ("export-chart-pdf", self._do_export_chart_pdf, []),
             ("export-schematic-png", self._do_export_schematic_png, []),
@@ -777,6 +836,75 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
                 self._show_error(f"Could not open file:\n{e.message}")
             return
         self._load_from_path(gfile.get_path())
+
+    # -- import measured impedance sweep (CSV or Touchstone .s1p) --
+    def _do_import_impedance(self, *_):
+        dialog = Gtk.FileDialog(title="Import Impedance Sweep")
+        filt = Gtk.FileFilter(name="Impedance sweep (*.csv, *.s1p)")
+        filt.add_pattern("*.csv")
+        filt.add_pattern("*.s1p")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(filt)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._on_import_impedance_response)
+
+    def _on_import_impedance_response(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error as e:
+            if not e.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
+                self._show_error(f"Could not import file:\n{e.message}")
+            return
+
+        path = gfile.get_path()
+        try:
+            if path.lower().endswith(".s1p"):
+                data = load_touchstone_1port(path)
+            else:
+                data = load_impedance_csv(path)
+        except (OSError, ValueError) as e:
+            self._show_error(f"Could not import impedance sweep:\n{e}")
+            return
+
+        self.impedance_sweep_data = data
+        f_lo, f_hi = data[0][0] / 1e6, data[-1][0] / 1e6
+        self._imported_impedance_summary = (
+            f"Loaded {len(data)} points, {f_lo:.3f}–{f_hi:.3f} MHz\n"
+            f"from {os.path.basename(path)}"
+        )
+        self.imported_impedance_label.set_label(self._imported_impedance_summary)
+        self.imported_impedance_check.set_sensitive(True)
+
+        # the imported data defines the range where we actually have
+        # measurements, so point the sweep at it
+        self.sweep_start_entry.set_value(f_lo)
+        self.sweep_stop_entry.set_value(f_hi)
+
+        self.imported_impedance_check.set_active(True)  # triggers _recompute via the toggle
+
+    def _on_toggle_use_imported_impedance(self, check: Gtk.CheckButton) -> None:
+        self.use_imported_impedance = check.get_active() and self.impedance_sweep_data is not None
+        self.r_src_entry.set_sensitive(not self.use_imported_impedance)
+        self.x_src_entry.set_sensitive(not self.use_imported_impedance)
+        if not self.use_imported_impedance and self._imported_impedance_summary:
+            self.imported_impedance_label.set_label(self._imported_impedance_summary)
+        self._update_sweep_frequency_controls()
+        self._recompute()
+
+    def _on_toggle_exact_frequencies(self, check: Gtk.CheckButton) -> None:
+        self.use_exact_imported_frequencies = check.get_active()
+        self._update_sweep_frequency_controls()
+        self._recompute()
+
+    def _update_sweep_frequency_controls(self) -> None:
+        # "sweep at exact imported frequencies" only takes effect while the
+        # imported impedance is actually in use; otherwise the Start/Stop/
+        # Steps grid is what defines the sweep, so re-enable it
+        using_exact = self.use_imported_impedance and self.use_exact_imported_frequencies
+        self.exact_frequencies_check.set_sensitive(self.use_imported_impedance)
+        self.sweep_start_entry.set_sensitive(not using_exact)
+        self.sweep_stop_entry.set_sensitive(not using_exact)
+        self.sweep_steps_entry.set_sensitive(not using_exact)
 
     # -- save / save as --
     def _do_save(self, *_):
