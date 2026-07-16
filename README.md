@@ -9,6 +9,8 @@ return loss.
 
 ![Screenshot_sweep](doc/screenshot_sweep.png)
 
+![Screenshot_auto_match](doc/auto_match.png)
+
 ## Files
 
 - `engine.py` — core impedance math (no GUI deps). `MatchingNetwork`
@@ -21,6 +23,11 @@ return loss.
   constant-X arcs (impedance), plus a fainter overlay of the mirrored
   constant-G/constant-B admittance grid, both labeled with actual
   ohm values scaled to Z0. Maps Z -> Gamma for plotting points and paths.
+  Also draws the VSWR-vs-frequency sweep plot.
+- `schematic.py` — draws the matching network as a ladder-network
+  schematic (IEC 60617-style symbols: resistor box, inductor coil,
+  capacitor plates), series elements inline and shunt elements branching
+  to ground. Used for the schematic/report exports, not shown live.
 - `app.py` — the GTK4 windows: the main window (source Z0/R/X/frequency
   entries, an "Add element" list where each row is (series/shunt, R/L/C,
   value, unit), the Smith chart, and result readouts) plus a separate
@@ -78,8 +85,16 @@ python3 app.py
   sweep range (Start/Stop/Steps), and the full element list to a JSON
   file, or reload one later. Handy for keeping a matching network per
   antenna/band around instead of re-entering values by hand.
-- **Export to PNG…** (`Ctrl+E`) — save the current Smith chart (grid,
-  arcs, and points as currently drawn) as a PNG image.
+- **Export Chart to PNG…** (`Ctrl+E`) — save the current Smith chart
+  (grid, arcs, and points as currently drawn) as a PNG image.
+- **Export Chart to PDF…** — the same chart as a single-page PDF, sized
+  to the paper size chosen in the View menu.
+- **Export Schematic to PNG…** — save the matching network's schematic
+  diagram as a PNG image.
+- **Export Report to PDF (Chart + Schematic + Sweep)…** — a multi-page
+  PDF: the Smith chart (portrait), the schematic (landscape), the
+  VSWR-vs-frequency sweep plot (landscape), and the sweep results table
+  (portrait, paginated if it's long).
 - **Export Sweep Table to CSV…** (`Ctrl+Shift+E`) — save the frequency
   sweep results (Freq/VSWR/Return Loss) as a CSV file.
 - **Quit** (`Ctrl+Q`).
@@ -96,3 +111,6 @@ python3 app.py
 - **Show Sweep Window** — show/hide the separate "Frequency Sweep"
   window; closing it from its own titlebar does the same thing, and
   this checkbox always reflects whether it's currently open.
+- **PDF Paper Size** — A4 / Letter / Legal for the PDF exports above.
+  Defaults to your system's configured paper size (via GTK's print
+  settings) the first time you run the app, and is remembered after that.

@@ -17,6 +17,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Gio, Gdk  # noqa: E402
 
 from matplotlib.backends.backend_gtk4agg import FigureCanvasGTK4Agg as FigureCanvas  # noqa: E402
+from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
 import csv
@@ -30,9 +31,32 @@ from chart import (  # noqa: E402
     ChartTheme, LIGHT_THEME, DARK_THEME, draw_smith_chart, draw_vswr_sweep,
     plot_point, plot_path, plot_sweep_points, gamma_to_z,
 )
+from schematic import draw_schematic  # noqa: E402
 
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "lsmith")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+# Paper sizes offered for PDF export, (width_mm, height_mm) in portrait.
+PAPER_SIZES_MM: dict[str, tuple[float, float]] = {
+    "A4": (210.0, 297.0),
+    "Letter": (215.9, 279.4),
+    "Legal": (215.9, 355.6),
+}
+
+# Sweep results table rows per PDF page, so a long sweep paginates instead
+# of shrinking down to illegible text on one page.
+SWEEP_TABLE_ROWS_PER_PAGE = 35
+
+
+def _detect_default_paper_size() -> str:
+    """Ask GTK for the system's default paper size (it reads the same
+    locale/libpaper configuration `lp`/CUPS use) and map it to one of our
+    supported names, falling back to A4 if it's something we don't offer."""
+    try:
+        name = Gtk.PaperSize.new(Gtk.PaperSize.get_default()).get_name()
+    except Exception:
+        return "A4"
+    return {"na_letter": "Letter", "na_legal": "Legal", "iso_a4": "A4"}.get(name, "A4")
 
 # Unit choices offered per component kind: (label, multiplier to SI base
 # unit -- ohms for R, henries for L, farads for C). The engine only ever
@@ -185,7 +209,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.network = MatchingNetwork(z_source=complex(25, -30), z0=50.0, freq_hz=14.2e6)
         self.rows: list[ElementRow] = []
         self.current_path: str | None = None
-        self.theme, self.theme_preset = _load_view_config()
+        self.theme, self.theme_preset, self.paper_size = _load_view_config()
         self.sweep_results: list[tuple[float, complex, float, float]] = []
         self.show_sweep_on_chart = False
 
@@ -451,6 +475,32 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         else:
             self._recompute()
 
+    # ---- chart drawing (shared by the live view and PDF export) ----
+    def _draw_chart_content(self, ax, theme: ChartTheme) -> None:
+        z0 = self.network.z0
+        z_src = self.network.z_source
+
+        draw_smith_chart(ax, z0=z0, theme=theme)
+        plot_point(ax, z_src, z0=z0, color=theme.foreground, marker="s", label="Source")
+
+        steps = self.network.steps()
+        z = z_src
+        for i, step in enumerate(steps):
+            color = COLORS[i % len(COLORS)]
+            plot_path(ax, step.path, z0=z0, color=color)
+            plot_point(ax, step.z_after, z0=z0, color=color)
+            z = step.z_after
+
+        if steps:
+            plot_point(ax, z, z0=z0, color="lime", marker="*", zorder=6)
+
+        if self.show_sweep_on_chart:
+            plot_sweep_points(
+                ax, [zf for _, zf, _, _ in self.sweep_results], z0=z0, label="Sweep"
+            )
+
+        ax.legend(loc="upper left", fontsize=8, frameon=False, labelcolor=theme.foreground)
+
     # ---- core recompute + redraw ----
     def _recompute(self, *_):
         z0 = self.z0_entry.get_value()
@@ -476,26 +526,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         sweep_results = sweep(z_source=z_src, elements=self.network.elements, freqs_hz=freqs, z0=z0)
         self.sweep_results = sweep_results
 
-        draw_smith_chart(self.ax, z0=z0, theme=self.theme)
-        plot_point(self.ax, z_src, z0=z0, color=self.theme.foreground, marker="s", label="Source")
-
-        steps = self.network.steps()
-        z = z_src
-        for i, step in enumerate(steps):
-            color = COLORS[i % len(COLORS)]
-            plot_path(self.ax, step.path, z0=z0, color=color)
-            plot_point(self.ax, step.z_after, z0=z0, color=color)
-            z = step.z_after
-
-        if steps:
-            plot_point(self.ax, z, z0=z0, color="lime", marker="*", zorder=6)
-
-        if self.show_sweep_on_chart:
-            plot_sweep_points(
-                self.ax, [zf for _, zf, _, _ in sweep_results], z0=z0, label="Sweep"
-            )
-
-        self.ax.legend(loc="upper left", fontsize=8, frameon=False, labelcolor=self.theme.foreground)
+        self._draw_chart_content(self.ax, self.theme)
         self.canvas.draw_idle()
 
         z_final = self.network.final_impedance()
@@ -570,7 +601,12 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         file_menu.append_section(None, io_section)
 
         export_section = Gio.Menu()
-        export_section.append("Export to PNG\u2026", "win.export-png")
+        export_section.append("Export Chart to PNG\u2026", "win.export-png")
+        export_section.append("Export Chart to PDF\u2026", "win.export-chart-pdf")
+        export_section.append("Export Schematic to PNG\u2026", "win.export-schematic-png")
+        export_section.append(
+            "Export Report to PDF (Chart + Schematic + Sweep)\u2026", "win.export-report-pdf"
+        )
         export_section.append("Export Sweep Table to CSV\u2026", "win.export-csv")
         file_menu.append_section(None, export_section)
 
@@ -597,6 +633,15 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         sweep_display_section.append("Show Sweep Window", "win.show-sweep-window")
         view_menu.append_section(None, sweep_display_section)
 
+        paper_size_menu = Gio.Menu()
+        for name in PAPER_SIZES_MM:
+            item = Gio.MenuItem.new(name, None)
+            item.set_action_and_target_value("win.paper-size", GLib.Variant.new_string(name))
+            paper_size_menu.append_item(item)
+        paper_size_section = Gio.Menu()
+        paper_size_section.append_submenu("PDF Paper Size", paper_size_menu)
+        view_menu.append_section(None, paper_size_section)
+
         menu.append_submenu("View", view_menu)
         return menu
 
@@ -606,6 +651,9 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
             ("save", self._do_save, ["<Control>s"]),
             ("save-as", self._do_save_as, ["<Control><Shift>s"]),
             ("export-png", self._do_export_png, ["<Control>e"]),
+            ("export-chart-pdf", self._do_export_chart_pdf, []),
+            ("export-schematic-png", self._do_export_schematic_png, []),
+            ("export-report-pdf", self._do_export_report_pdf, []),
             ("export-csv", self._do_export_csv, ["<Control><Shift>e"]),
             ("custom-colors", self._do_custom_colors, []),
         ):
@@ -621,6 +669,12 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         theme_action.connect("activate", self._on_theme_action)
         self.add_action(theme_action)
         self.theme_action = theme_action
+
+        paper_size_action = Gio.SimpleAction.new_stateful(
+            "paper-size", GLib.VariantType.new("s"), GLib.Variant.new_string(self.paper_size)
+        )
+        paper_size_action.connect("activate", self._on_paper_size_action)
+        self.add_action(paper_size_action)
 
         show_sweep_action = Gio.SimpleAction.new_stateful(
             "show-sweep-on-chart", None, GLib.Variant.new_boolean(self.show_sweep_on_chart)
@@ -643,8 +697,13 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         action.set_state(param)
         self.theme_preset = param.get_string()
         self.theme = DARK_THEME if self.theme_preset == "dark" else LIGHT_THEME
-        _save_view_config(self.theme, self.theme_preset)
+        _save_view_config(self.theme, self.theme_preset, self.paper_size)
         self._recompute()
+
+    def _on_paper_size_action(self, action: Gio.SimpleAction, param: GLib.Variant) -> None:
+        action.set_state(param)
+        self.paper_size = param.get_string()
+        _save_view_config(self.theme, self.theme_preset, self.paper_size)
 
     def _on_toggle_show_sweep(self, action: Gio.SimpleAction, _param=None) -> None:
         new_state = not action.get_state().get_boolean()
@@ -701,7 +760,7 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.theme = dataclasses.replace(self.theme, **{field: _rgba_to_hex(rgba)})
         self.theme_preset = "custom"
         self.theme_action.set_state(GLib.Variant.new_string("custom"))
-        _save_view_config(self.theme, self.theme_preset)
+        _save_view_config(self.theme, self.theme_preset, self.paper_size)
         self._recompute()
 
     # -- open --
@@ -743,52 +802,166 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
             path += ".json"
         self._save_to_path(path)
 
-    # -- export to PNG --
-    def _do_export_png(self, *_):
-        dialog = Gtk.FileDialog(title="Export to PNG", initial_name="smith_chart.png")
-        filt = Gtk.FileFilter(name="PNG image (*.png)")
-        filt.add_pattern("*.png")
+    # -- shared export-to-file plumbing --
+    def _export_via_dialog(self, title: str, initial_name: str, extension: str,
+                            filter_name: str, save_fn) -> None:
+        """save_fn(path) does the actual writing; this just handles the file
+        picker, the extension fallback, and turning errors into a dialog."""
+        dialog = Gtk.FileDialog(title=title, initial_name=initial_name)
+        filt = Gtk.FileFilter(name=filter_name)
+        filt.add_pattern(f"*{extension}")
         filters = Gio.ListStore.new(Gtk.FileFilter)
         filters.append(filt)
         dialog.set_filters(filters)
-        dialog.save(self, None, self._on_export_response)
 
-    def _on_export_response(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error as e:
-            if not e.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
-                self._show_error(f"Could not export PNG:\n{e.message}")
-            return
-        path = gfile.get_path()
-        if not path.endswith(".png"):
-            path += ".png"
-        try:
-            self.figure.savefig(path, dpi=150)
-        except OSError as e:
-            self._show_error(f"Could not export PNG:\n{e}")
+        def on_response(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                gfile = dialog.save_finish(result)
+            except GLib.Error as e:
+                if not e.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
+                    self._show_error(f"Could not export:\n{e.message}")
+                return
+            path = gfile.get_path()
+            if not path.endswith(extension):
+                path += extension
+            try:
+                save_fn(path)
+            except OSError as e:
+                self._show_error(f"Could not export:\n{e}")
+
+        dialog.save(self, None, on_response)
+
+    def _build_schematic_figure(self) -> Figure:
+        fig = Figure(figsize=(8, 3), dpi=150)
+        ax = fig.add_subplot(111)
+        draw_schematic(ax, self.network.z_source, self.network.elements, self.network.z0,
+                        theme=self.theme)
+        return fig
+
+    # -- PDF pages sized to the selected paper size (View > PDF Paper Size) --
+    def _paper_size_inches(self, orientation: str = "portrait") -> tuple[float, float]:
+        w_mm, h_mm = PAPER_SIZES_MM[self.paper_size]
+        if orientation == "landscape":
+            w_mm, h_mm = h_mm, w_mm
+        return w_mm / 25.4, h_mm / 25.4
+
+    def _build_chart_page_figure(self) -> Figure:
+        # the Smith chart is roughly square, so it fits a portrait page
+        # comfortably (equal aspect keeps it centered within the margins)
+        w_in, h_in = self._paper_size_inches("portrait")
+        fig = Figure(figsize=(w_in, h_in), dpi=150)
+        margin = 0.06
+        ax = fig.add_axes((margin, margin, 1 - 2 * margin, 1 - 2 * margin))
+        self._draw_chart_content(ax, self.theme)
+        return fig
+
+    def _build_schematic_page_figure(self) -> Figure:
+        # the schematic is wide and short, so a landscape page fits it far
+        # better than portrait would
+        w_in, h_in = self._paper_size_inches("landscape")
+        fig = Figure(figsize=(w_in, h_in), dpi=150)
+        margin = 0.06
+        ax = fig.add_axes((margin, margin, 1 - 2 * margin, 1 - 2 * margin))
+        draw_schematic(ax, self.network.z_source, self.network.elements, self.network.z0,
+                        theme=self.theme)
+        return fig
+
+    def _build_sweep_plot_page_figure(self) -> Figure:
+        # same reasoning as the schematic: wide and short fits landscape best
+        w_in, h_in = self._paper_size_inches("landscape")
+        fig = Figure(figsize=(w_in, h_in), dpi=150)
+        margin = 0.1
+        ax = fig.add_axes((margin, margin, 1 - 2 * margin, 1 - 2 * margin))
+        freqs_hz = [f for f, _, _, _ in self.sweep_results]
+        vswr_values = [v for _, _, v, _ in self.sweep_results]
+        draw_vswr_sweep(ax, freqs_hz, vswr_values, theme=self.theme)
+        return fig
+
+    def _build_sweep_table_page_figures(self) -> list[Figure]:
+        # a long sweep (many steps) won't fit legibly on one page, so this
+        # paginates instead of shrinking the text down to nothing
+        col_labels = ["Freq (MHz)", "VSWR", "Return Loss (dB)"]
+        rows = []
+        for freq_hz, _, vswr_val, rl_val in self.sweep_results:
+            vswr_str = f"{vswr_val:.2f}" if vswr_val != float("inf") else "∞"
+            rl_str = f"{rl_val:.1f}" if rl_val != float("inf") else "∞"
+            rows.append([f"{freq_hz / 1e6:.3f}", vswr_str, rl_str])
+
+        w_in, h_in = self._paper_size_inches("portrait")
+        figures = []
+        for start in range(0, len(rows), SWEEP_TABLE_ROWS_PER_PAGE):
+            chunk = rows[start:start + SWEEP_TABLE_ROWS_PER_PAGE]
+            fig = Figure(figsize=(w_in, h_in), dpi=150)
+            fig.patch.set_facecolor(self.theme.background)
+            ax = fig.add_subplot(111)
+            ax.axis("off")
+            ax.set_facecolor(self.theme.background)
+            ax.set_title("Frequency Sweep Results", color=self.theme.foreground,
+                          fontsize=13, pad=20)
+
+            table = ax.table(cellText=chunk, colLabels=col_labels, loc="upper center",
+                              cellLoc="center")
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.4)
+            for (row, _col), cell in table.get_celld().items():
+                cell.set_edgecolor(self.theme.foreground)
+                cell.get_text().set_color(self.theme.foreground)
+                cell.set_facecolor(self.theme.background)
+                if row == 0:
+                    cell.set_text_props(weight="bold")
+
+            figures.append(fig)
+        return figures or [self._empty_sweep_table_page_figure(w_in, h_in, col_labels)]
+
+    def _empty_sweep_table_page_figure(self, w_in: float, h_in: float, col_labels) -> Figure:
+        fig = Figure(figsize=(w_in, h_in), dpi=150)
+        fig.patch.set_facecolor(self.theme.background)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.set_facecolor(self.theme.background)
+        ax.set_title("Frequency Sweep Results", color=self.theme.foreground, fontsize=13, pad=20)
+        ax.text(0.5, 0.5, "(no sweep data)", color=self.theme.foreground,
+                ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    # -- export chart --
+    def _do_export_png(self, *_):
+        self._export_via_dialog(
+            "Export Chart to PNG", "smith_chart.png", ".png", "PNG image (*.png)",
+            lambda path: self.figure.savefig(path, dpi=150),
+        )
+
+    def _do_export_chart_pdf(self, *_):
+        self._export_via_dialog(
+            "Export Chart to PDF", "smith_chart.pdf", ".pdf", "PDF file (*.pdf)",
+            lambda path: self._build_chart_page_figure().savefig(path),
+        )
+
+    # -- export schematic --
+    def _do_export_schematic_png(self, *_):
+        self._export_via_dialog(
+            "Export Schematic to PNG", "schematic.png", ".png", "PNG image (*.png)",
+            lambda path: self._build_schematic_figure().savefig(path, dpi=150),
+        )
+
+    # -- export full report --
+    def _do_export_report_pdf(self, *_):
+        def save(path: str) -> None:
+            with PdfPages(path) as pdf:
+                pdf.savefig(self._build_chart_page_figure())
+                pdf.savefig(self._build_schematic_page_figure())
+                pdf.savefig(self._build_sweep_plot_page_figure())
+                for fig in self._build_sweep_table_page_figures():
+                    pdf.savefig(fig)
+
+        self._export_via_dialog(
+            "Export Report to PDF", "report.pdf", ".pdf", "PDF file (*.pdf)", save,
+        )
 
     # -- export sweep table to CSV --
     def _do_export_csv(self, *_):
-        dialog = Gtk.FileDialog(title="Export Sweep Table to CSV", initial_name="sweep.csv")
-        filt = Gtk.FileFilter(name="CSV file (*.csv)")
-        filt.add_pattern("*.csv")
-        filters = Gio.ListStore.new(Gtk.FileFilter)
-        filters.append(filt)
-        dialog.set_filters(filters)
-        dialog.save(self, None, self._on_export_csv_response)
-
-    def _on_export_csv_response(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
-        try:
-            gfile = dialog.save_finish(result)
-        except GLib.Error as e:
-            if not e.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
-                self._show_error(f"Could not export CSV:\n{e.message}")
-            return
-        path = gfile.get_path()
-        if not path.endswith(".csv"):
-            path += ".csv"
-        try:
+        def save(path: str) -> None:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Freq (MHz)", "VSWR", "Return Loss (dB)"])
@@ -796,8 +969,10 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
                     vswr_str = f"{vswr_val:.4f}" if vswr_val != float("inf") else "inf"
                     rl_str = f"{rl_val:.4f}" if rl_val != float("inf") else "inf"
                     writer.writerow([f"{freq_hz / 1e6:.6f}", vswr_str, rl_str])
-        except OSError as e:
-            self._show_error(f"Could not export CSV:\n{e}")
+
+        self._export_via_dialog(
+            "Export Sweep Table to CSV", "sweep.csv", ".csv", "CSV file (*.csv)", save,
+        )
 
     # -- serialization --
     def _network_to_dict(self) -> dict:
@@ -867,32 +1042,38 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self._recompute()
 
 
-def _load_view_config() -> tuple[ChartTheme, str]:
-    """Read the persisted view (theme) settings, falling back to the light theme
-    if the config file is missing, unreadable, or from a future/incompatible format."""
+def _load_view_config() -> tuple[ChartTheme, str, str]:
+    """Read the persisted view (theme, paper size) settings, falling back to
+    the light theme and the system's default paper size if the config file
+    is missing, unreadable, or from a future/incompatible format."""
     try:
         with open(CONFIG_PATH) as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return LIGHT_THEME, "light"
+        data = {}
+
+    paper_size = data.get("paper_size")
+    if paper_size not in PAPER_SIZES_MM:
+        paper_size = _detect_default_paper_size()
 
     preset = data.get("theme_preset", "light")
     if preset == "dark":
-        return DARK_THEME, "dark"
+        return DARK_THEME, "dark", paper_size
     if preset == "custom":
         theme = ChartTheme(
             background=data.get("background", LIGHT_THEME.background),
             foreground=data.get("foreground", LIGHT_THEME.foreground),
         )
-        return theme, "custom"
-    return LIGHT_THEME, "light"
+        return theme, "custom", paper_size
+    return LIGHT_THEME, "light", paper_size
 
 
-def _save_view_config(theme: ChartTheme, preset: str) -> None:
+def _save_view_config(theme: ChartTheme, preset: str, paper_size: str) -> None:
     data = {
         "theme_preset": preset,
         "background": theme.background,
         "foreground": theme.foreground,
+        "paper_size": paper_size,
     }
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
