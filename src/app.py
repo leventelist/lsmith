@@ -25,7 +25,7 @@ import json
 import math
 import os
 
-from engine import MatchingNetwork, Topology, Kind, sweep  # noqa: E402
+from engine import MatchingNetwork, Topology, Kind, sweep, solve_l_match, LMatchSolution  # noqa: E402
 from chart import (  # noqa: E402
     ChartTheme, LIGHT_THEME, DARK_THEME, draw_smith_chart, draw_vswr_sweep,
     plot_point, plot_path, plot_sweep_points, gamma_to_z,
@@ -48,6 +48,24 @@ UNIT_OPTIONS: dict[Kind, list[tuple[str, float]]] = {
 DEFAULT_UNIT_INDEX: dict[Kind, int] = {Kind.R: 0, Kind.L: 2, Kind.C: 3}
 
 COLORS = ["#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
+
+
+def _best_unit_index(kind: Kind, si_value: float) -> int:
+    """Pick whichever unit shows si_value as a number closest to 1..1000,
+    so an auto-solved component value (e.g. from solve_l_match) doesn't
+    show up as something awkward like "0.000617" or "617000" nH."""
+    options = UNIT_OPTIONS[kind]
+    if si_value == 0:
+        return DEFAULT_UNIT_INDEX[kind]
+    best_i, best_score = DEFAULT_UNIT_INDEX[kind], float("inf")
+    for i, (_, scale) in enumerate(options):
+        scaled = abs(si_value) / scale
+        if 1 <= scaled < 1000:
+            return i
+        score = abs(math.log10(scaled))
+        if score < best_score:
+            best_i, best_score = i, score
+    return best_i
 
 
 class ElementRow(Gtk.Box):
@@ -106,6 +124,15 @@ class ElementRow(Gtk.Box):
     def get_value_si(self) -> float:
         _, scale = UNIT_OPTIONS[self.get_kind()][self.unit_combo.get_selected()]
         return self.value_entry.get_value() * scale
+
+    def set_kind_and_value_si(self, kind: Kind, si_value: float) -> None:
+        """Set kind and value together (e.g. from an auto-match solution),
+        picking whichever unit displays si_value most sensibly."""
+        self.kind_combo.set_selected([Kind.R, Kind.L, Kind.C].index(kind))
+        idx = _best_unit_index(kind, si_value)
+        self.unit_combo.set_selected(idx)
+        _, scale = UNIT_OPTIONS[kind][idx]
+        self.value_entry.set_value(si_value / scale)
 
 
 class SweepWindow(Gtk.Window):
@@ -231,6 +258,10 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         grid.attach(Gtk.Label(label="Source X (\u03a9)", xalign=0), 0, 3, 1, 1)
         grid.attach(self.x_src_entry, 1, 3, 1, 1)
 
+        auto_match_btn = Gtk.Button(label="Auto-Match to Z0\u2026")
+        auto_match_btn.connect("clicked", self._do_auto_match)
+        left.append(auto_match_btn)
+
         left.append(Gtk.Separator())
         left.append(Gtk.Label(label="<b>Matching elements</b>", use_markup=True, xalign=0))
 
@@ -340,6 +371,85 @@ class SmithMatchWindow(Gtk.ApplicationWindow):
         self.rows.remove(row)
         self.elements_box.remove(row)
         self._recompute()
+
+    # ---- auto-match ----
+    def _do_auto_match(self, *_):
+        z0 = self.z0_entry.get_value()
+        freq_hz = self.freq_entry.get_value() * 1e6
+        z_src = complex(self.r_src_entry.get_value(), self.x_src_entry.get_value())
+
+        if z_src.real <= 0:
+            self._show_error("Cannot auto-match: Source R must be positive.")
+            return
+
+        solutions = solve_l_match(z_src, z0, freq_hz)
+        if not solutions:
+            self._show_error("Source is already matched to Z0 — no elements needed.")
+            return
+
+        self._show_auto_match_dialog(solutions)
+
+    def _show_auto_match_dialog(self, solutions: list[LMatchSolution]) -> None:
+        dialog = Gtk.Window(transient_for=self, modal=True, title="Auto-Match to Z0")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+        dialog.set_child(box)
+
+        box.append(Gtk.Label(
+            label="This replaces the current element list. Choose a solution:", xalign=0
+        ))
+
+        group_leader = None
+        selected = {"solution": solutions[0]}
+        for sol in solutions:
+            desc = ", ".join(
+                f"{e.topology.value} {e.kind.value} = {e.value:.4g} "
+                f"{'H' if e.kind == Kind.L else 'F' if e.kind == Kind.C else 'Ω'}"
+                for e in sol.elements
+            )
+            btn = Gtk.CheckButton(label=f"{sol.label}  ({desc})")
+            if group_leader is None:
+                group_leader = btn
+                btn.set_active(True)
+            else:
+                btn.set_group(group_leader)
+            btn.connect("toggled", lambda b, s=sol: selected.update(solution=s) if b.get_active() else None)
+            box.append(btn)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_row.set_halign(Gtk.Align.END)
+        box.append(btn_row)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_: dialog.close())
+        btn_row.append(cancel_btn)
+
+        apply_btn = Gtk.Button(label="Apply")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.connect("clicked", lambda *_: (self._apply_auto_match(selected["solution"]), dialog.close()))
+        btn_row.append(apply_btn)
+
+        dialog.present()
+
+    def _apply_auto_match(self, solution: LMatchSolution) -> None:
+        for row in list(self.rows):
+            self.elements_box.remove(row)
+        self.rows.clear()
+
+        for element in solution.elements:
+            row = ElementRow(on_change=self._recompute, on_remove=self._remove_row)
+            self.rows.append(row)
+            self.elements_box.append(row)
+            row.topo_combo.set_selected(0 if element.topology == Topology.SERIES else 1)
+            row.set_kind_and_value_si(element.kind, element.value)
+
+        if not self.rows:
+            self._add_row()
+        else:
+            self._recompute()
 
     # ---- core recompute + redraw ----
     def _recompute(self, *_):

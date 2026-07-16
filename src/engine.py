@@ -198,3 +198,91 @@ def sweep(
         z_final = net.final_impedance()
         results.append((f, z_final, net.vswr(z_final), net.return_loss_db(z_final)))
     return results
+
+
+@dataclass(frozen=True)
+class LMatchSolution:
+    label: str
+    elements: list[Element]
+
+
+def _reactance_element(topology: Topology, freq_hz: float, x_ohms: float) -> Element:
+    """A series/shunt element presenting reactance x_ohms at freq_hz (an
+    inductor for positive X, a capacitor for negative X)."""
+    w = 2.0 * math.pi * freq_hz
+    if x_ohms > 0:
+        return Element(topology, Kind.L, x_ohms / w)
+    return Element(topology, Kind.C, -1.0 / (w * x_ohms))
+
+
+def _susceptance_element(topology: Topology, freq_hz: float, b_siemens: float) -> Element:
+    """A shunt element presenting susceptance b_siemens at freq_hz (a
+    capacitor for positive B, an inductor for negative B)."""
+    w = 2.0 * math.pi * freq_hz
+    if b_siemens > 0:
+        return Element(topology, Kind.C, b_siemens / w)
+    return Element(topology, Kind.L, -1.0 / (w * b_siemens))
+
+
+def solve_l_match(z_load: complex, z0: float, freq_hz: float) -> list[LMatchSolution]:
+    """
+    Find L-network solutions (at most two reactive elements) that transform
+    z_load exactly to z0, evaluated at freq_hz. z_load is the impedance
+    looking into the network from the source side (e.g. an antenna
+    feedpoint measurement) and must have positive resistance.
+
+    Returns:
+      - [] if z_load is already matched (within numerical tolerance).
+      - one 1-element solution if R already equals Z0 but X != 0 (just
+        cancel the reactance with a single series element).
+      - otherwise up to two 2-element solutions (both exact), since the
+        classic L-match derivation has a +/- choice at each of the two
+        valid topologies (series-then-shunt when R < Z0, shunt-then-series
+        when R > Z0) -- exactly one topology is valid for any given load.
+
+    Elements are ordered from the load outward, i.e. the same order
+    MatchingNetwork.add() expects to reach z0.
+    """
+    r_load, x_load = z_load.real, z_load.imag
+    if r_load <= 0:
+        raise ValueError("z_load must have positive resistance to be L-matched")
+
+    if abs(r_load - z0) < 1e-9 and abs(x_load) < 1e-9:
+        return []
+
+    if abs(r_load - z0) < 1e-9:
+        elem = _reactance_element(Topology.SERIES, freq_hz, -x_load)
+        return [LMatchSolution(f"Series {elem.kind.value} only", [elem])]
+
+    solutions = []
+
+    if r_load < z0:
+        # series reactance first (from the load), then a shunt element to
+        # cancel the remaining susceptance and land exactly on z0
+        q = math.sqrt(r_load * (z0 - r_load))
+        for sign in (1.0, -1.0):
+            x_total = sign * q  # reactance at the load node after the series element
+            xs = x_total - x_load
+            b_after_series = -x_total / (r_load * z0)
+            bp = -b_after_series
+            elem1 = _reactance_element(Topology.SERIES, freq_hz, xs)
+            elem2 = _susceptance_element(Topology.SHUNT, freq_hz, bp)
+            label = f"Series {elem1.kind.value} → Shunt {elem2.kind.value}"
+            solutions.append(LMatchSolution(label, [elem1, elem2]))
+    else:
+        # shunt susceptance first (from the load), then a series element to
+        # cancel the remaining reactance and land exactly on z0
+        g_load = r_load / (r_load ** 2 + x_load ** 2)
+        b_load = -x_load / (r_load ** 2 + x_load ** 2)
+        q = math.sqrt(g_load * (1.0 / z0 - g_load))
+        for sign in (1.0, -1.0):
+            b_total = sign * q  # susceptance at the load node after the shunt element
+            bs = b_total - b_load
+            x_after_shunt = -b_total * z0 / g_load
+            xs2 = -x_after_shunt
+            elem1 = _susceptance_element(Topology.SHUNT, freq_hz, bs)
+            elem2 = _reactance_element(Topology.SERIES, freq_hz, xs2)
+            label = f"Shunt {elem1.kind.value} → Series {elem2.kind.value}"
+            solutions.append(LMatchSolution(label, [elem1, elem2]))
+
+    return solutions

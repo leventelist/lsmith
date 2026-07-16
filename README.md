@@ -1,4 +1,4 @@
-# Smith Chart Matching Tool
+# Smith Chart Matching Tool — with Automatic L-Network
 
 A small GTK4 app for visualizing impedance matching: enter a source
 impedance, add series/shunt R/L/C elements, and watch each one trace
@@ -14,7 +14,9 @@ return loss.
 - `engine.py` — core impedance math (no GUI deps). `MatchingNetwork`
   holds a source Z and an ordered list of series/shunt R/L/C elements,
   and computes the impedance after each step, plus Gamma/VSWR/return loss.
-  This is fully unit-testable on its own.
+  `solve_l_match()` analytically computes a 1- or 2-element L-network that
+  exactly matches a given source Z to Z0. This is fully unit-testable on
+  its own.
 - `chart.py` — draws the Smith chart grid: constant-R circles and
   constant-X arcs (impedance), plus a fainter overlay of the mirrored
   constant-G/constant-B admittance grid, both labeled with actual
@@ -42,7 +44,12 @@ python3 app.py
 1. Set Z0 (system impedance, usually 50), frequency, and the source
    R + jX you're trying to match (e.g. from your antenna feedpoint
    measurement).
-2. Click "+ Add element" to add a matching component. Choose:
+   - Or click **Auto-Match to Z0…** to have it solve for you: it computes
+     the L-network (1 or 2 components) that matches exactly, offers a
+     choice between solutions when more than one exists (e.g. series L +
+     shunt C vs. series L + shunt L), and fills in the element list for
+     whichever one you pick.
+2. Click "+ Add element" to add a matching component by hand. Choose:
    - **series** or **shunt** (topology)
    - **R**, **L**, or **C** (component type)
    - the value and a unit — Ω/kΩ/MΩ for R, mH/µH/nH/pH for L,
